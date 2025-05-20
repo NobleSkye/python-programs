@@ -15,7 +15,7 @@ GAMES = ['tictactoe', 'pong', 'snake', 'hangman', 'numguess', 'adventure', 'ttt-
 
 # Available commands for auto-completion
 COMMANDS = ['exit', 'quit', 'cd', 'ls', 'pwd', 'clear', 'cat', 'echo', 'help', 'date', 'time',
-           'whoami', 'hostname', 'uptime', 'ps', 'games', 'mkdir', 'touch', 'rm', 'cp', 'mv', 'config'] + GAMES
+           'whoami', 'hostname', 'uptime', 'ps', 'games', 'mkdir', 'touch', 'rm', 'cp', 'mv', 'config', 'su'] + GAMES
 
 class Completer:
     def __init__(self, commands):
@@ -95,6 +95,8 @@ base_dir_name = "system32"
 games_dir_name = "games"
 base_dir_path = os.path.join(os.getcwd(), base_dir_name)
 games_dir_path = os.path.join(base_dir_path, games_dir_name)
+# Path to the central password file
+sys_password_file = os.path.join(base_dir_path, ".sys")
 global current_dir
 current_dir = base_dir_path
 start_time = time.time()
@@ -121,12 +123,82 @@ def loading(range_value, sleep_time):
         time.sleep(sleep_time)
 
 def startup():
-    print("System Starting")
-    loading(100, 0.01)
     clear()
-    print("System Started")
-    user = input("Login: ")
-    password = getpass('Password: ')
+    print("Welcome to the Python Terminal Environment!")
+    print("1) Existing user\n2) New user")
+    while True:
+        choice = input("Select an option (1 or 2): ").strip()
+        if choice in ("1", "2"):
+            break
+        print("Invalid choice. Please enter 1 or 2.")
+
+    users_dir = os.path.join(base_dir_path, "users")
+    if not os.path.exists(users_dir):
+        os.makedirs(users_dir)
+
+    # Load or create the central password file
+    if not os.path.exists(sys_password_file):
+        with open(sys_password_file, 'w') as f:
+            f.write("")
+
+    def get_passwords():
+        passwords = {}
+        with open(sys_password_file, 'r') as f:
+            for line in f:
+                if ':' in line:
+                    u, p = line.strip().split(':', 1)
+                    passwords[u] = p
+        return passwords
+
+    def set_password(username, password):
+        passwords = get_passwords()
+        passwords[username] = password
+        with open(sys_password_file, 'w') as f:
+            for u, p in passwords.items():
+                f.write(f"{u}:{p}\n")
+
+    if choice == "2":
+        # New user signup
+        while True:
+            user = input("Choose a username: ").strip()
+            if not user:
+                print("Username cannot be empty.")
+                continue
+            if ' ' in user:
+                print("Username cannot contain spaces.")
+                continue
+            break
+        user_dir = os.path.join(users_dir, user)
+        passwords = get_passwords()
+        if user in passwords:
+            print("User already exists. Please log in as an existing user.")
+            input("Press Enter to continue...")
+            clear()
+            return startup()
+        if not os.path.exists(user_dir):
+            os.makedirs(user_dir)
+        password = getpass('Set password: ')
+        set_password(user, password)
+        print("Account created. Please log in as an existing user.")
+        input("Press Enter to continue...")
+        clear()
+        return startup()
+    else:
+        # Existing user login
+        user = input("Login: ").strip()
+        user_dir = os.path.join(users_dir, user)
+        passwords = get_passwords()
+        if user not in passwords or not os.path.exists(user_dir):
+            print("User does not exist. Please sign up as a new user.")
+            input("Press Enter to continue...")
+            clear()
+            return startup()
+        password = getpass('Password: ')
+        if password != passwords[user]:
+            print("Login failed. Try again.")
+            input("Press Enter to continue...")
+            clear()
+            return startup()
     clear()
     command_loop(user, base_dir_path)
 
@@ -164,9 +236,28 @@ def cat_file(args):
     if not args:
         print("Error: No file specified")
         return
-        
+
     path = resolve_path(args[0])
     if path:
+        filename = os.path.basename(path)
+        # Require sudo for .sys file
+        if filename == ".sys":
+            print("sudo password required to view this file.")
+            sudo_password = getpass('Password: ')
+            # Check password for current user
+            def get_passwords():
+                passwords = {}
+                with open(sys_password_file, 'r') as f:
+                    for line in f:
+                        if ':' in line:
+                            u, p = line.strip().split(':', 1)
+                            passwords[u] = p
+                return passwords
+            passwords = get_passwords()
+            current_user = os.environ.get('USER', 'user')
+            if current_user not in passwords or sudo_password != passwords[current_user]:
+                print("Sorry, try again. (sudo: incorrect password)")
+                return
         try:
             with open(path, 'r') as f:
                 print(f.read(), end='')
@@ -211,6 +302,7 @@ def execute_command(cmd_parts, input_data=None, user=None):
     """Execute a single command and return its output"""
     if user is None:
         user = "user"  # fallback value
+    users_dir = os.path.join(base_dir_path, "users")
     cmd = cmd_parts[0]
     args = cmd_parts[1:]
     
@@ -222,6 +314,7 @@ def execute_command(cmd_parts, input_data=None, user=None):
     sys.stdout = output_buffer
     
     try:
+        su_user_result = None
         # Add direct game execution check before other commands
         if cmd in GAMES:
             launch_game([cmd])
@@ -235,9 +328,52 @@ def execute_command(cmd_parts, input_data=None, user=None):
             print(' '.join(args))
         elif cmd == 'cat':
             cat_file(args)
+        elif cmd == 'nano':
+            # Only allow nano if not editing .sys, or require sudo for .sys
+            if args and len(args) >= 1:
+                filename = args[0]
+                if os.path.basename(filename) == ".sys":
+                    print("sudo password required to edit this file.")
+                    sudo_password = getpass('Password: ')
+                    def get_passwords():
+                        passwords = {}
+                        with open(sys_password_file, 'r') as f:
+                            for line in f:
+                                if ':' in line:
+                                    u, p = line.strip().split(':', 1)
+                                    passwords[u] = p
+                        return passwords
+                    passwords = get_passwords()
+                    current_user = user if user else os.environ.get('USER', 'user')
+                    if current_user not in passwords or sudo_password != passwords[current_user]:
+                        print("Sorry, try again. (sudo: incorrect password)")
+                        return output_buffer.getvalue(), None
+            # Actually run nano
+            try:
+                subprocess.run(["nano"] + args)
+            except Exception as e:
+                print(f"Error running nano: {e}")
         elif cmd == 'games':
             launch_game(args)
         elif cmd == 'config':
+            # Require sudo for config changes
+            if args and len(args) == 2:
+                # Editing config, require sudo
+                print("sudo password required to edit config.")
+                sudo_password = getpass('Password: ')
+                def get_passwords():
+                    passwords = {}
+                    with open(sys_password_file, 'r') as f:
+                        for line in f:
+                            if ':' in line:
+                                u, p = line.strip().split(':', 1)
+                                passwords[u] = p
+                    return passwords
+                passwords = get_passwords()
+                current_user = user if user else os.environ.get('USER', 'user')
+                if current_user not in passwords or sudo_password != passwords[current_user]:
+                    print("Sorry, try again. (sudo: incorrect password)")
+                    return output_buffer.getvalue(), None
             handle_config_command(args)
         elif cmd == 'clear':
             clear()
@@ -249,6 +385,25 @@ def execute_command(cmd_parts, input_data=None, user=None):
             print(user)
         elif cmd == 'hostname':
             print(hostname)
+        elif cmd == 'su':
+            if not args:
+                print("su: Missing all arguments")
+            else:
+                su_user = args[0]
+                su_user_dir = os.path.join(users_dir, su_user)
+                su_password_file = os.path.join(su_user_dir, ".password")
+                if not os.path.exists(su_user_dir) or not os.path.exists(su_password_file):
+                    print("su: User does not exist")
+                else:
+                    su_password = getpass('Password: ')
+                    with open(su_password_file, 'r') as f:
+                        real_su_password = f.read().strip()
+                    if su_password == real_su_password:
+                        print(f"Switched to user: {su_user}")
+                        su_user_result = su_user
+                    else:
+                        print("su: Authentication failure")
+
         elif cmd == 'uptime':
             uptime = time.time() - start_time
             hours = int(uptime // 3600)
@@ -348,6 +503,7 @@ def execute_command(cmd_parts, input_data=None, user=None):
             print("  games      - List and launch games")
             print("  config     - View/edit configuration")
             print("  exit/quit  - Exit shell")
+            print("  su [user]  - Switch user accounts")
         elif cmd in ['exit', 'quit']:
             print("Goodbye!")
             save_history()
@@ -357,8 +513,8 @@ def execute_command(cmd_parts, input_data=None, user=None):
             print("Type 'help' for a list of commands")
     finally:
         sys.stdout = old_stdout
-    
-    return output_buffer.getvalue()
+
+    return output_buffer.getvalue(), su_user_result
 
 def get_prompt(user, hostname, rel_path):
     """Get command prompt based on config"""
@@ -408,12 +564,13 @@ def handle_config_command(args):
 def command_loop(user, initial_dir):
     global current_dir
     current_dir = initial_dir
+    current_user = user
     while True:
         try:
             rel_path = os.path.relpath(current_dir, base_dir_path)
             prompt_path = '/' if rel_path == '.' else rel_path
-            prompt = get_prompt(user, hostname, prompt_path)
-            
+            prompt = get_prompt(current_user, hostname, prompt_path)
+
             try:
                 command = input(prompt).strip()
             except EOFError:
@@ -425,11 +582,11 @@ def command_loop(user, initial_dir):
 
             # Add command to history
             readline.add_history(command)
-            
+
             # Handle pipes and redirections
             commands = command.split('|')
             input_data = None
-            
+
             # Process each command in the pipe
             for i, cmd in enumerate(commands):
                 # Handle output redirection
@@ -440,10 +597,14 @@ def command_loop(user, initial_dir):
                     if not outfile:
                         print("Error: No output file specified")
                         break
-                    
+
                     # Execute the command
-                    output = execute_command(cmd.split(), input_data, user)
-                    
+                    output, su_user_result = execute_command(cmd.split(), input_data, current_user)
+
+                    # If su_user_result is not None, switch user
+                    if su_user_result is not None:
+                        current_user = su_user_result
+
                     # Write to file
                     try:
                         with open(os.path.join(current_dir, outfile), 'w') as f:
@@ -451,19 +612,21 @@ def command_loop(user, initial_dir):
                     except IOError as e:
                         print(f"Error writing to file: {e}")
                     break
-                
+
                 # Normal command or pipe
-                output = execute_command(cmd.split(), input_data, user)
+                output, su_user_result = execute_command(cmd.split(), input_data, current_user)
+                if su_user_result is not None:
+                    current_user = su_user_result
                 if i < len(commands) - 1:
                     # This is not the last command, pass output as input to next command
                     input_data = output
                 else:
                     # This is the last command, print output
                     print(output, end='')
-            
+
             # Save history after each command
             save_history()
-            
+
         except KeyboardInterrupt:
             print("\nUse 'exit' to quit.")
             continue
